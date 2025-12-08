@@ -1,69 +1,123 @@
-
 import pandas as pd
 import string
 import nltk
 from nltk.corpus import stopwords
-from sklearn.feature_extraction.text import TfidfVectorizer
+from nltk.stem import WordNetLemmatizer
 
-nltk.download('stopwords')
+# Make sure NLTK resources are available
+nltk.download("stopwords")
+nltk.download("wordnet")
 
-def clean_text(text):
+STOPWORDS = set(stopwords.words("english"))
+LEMMATIZER = WordNetLemmatizer()
+
+
+def clean_text(text: str) -> str:
+    """
+    Take raw text and return a cleaned version:
+    - lowercase
+    - remove punctuation
+    - remove stopwords
+    - lemmatize
+    """
     if not isinstance(text, str):
         return ""
+
+    # lowercasing
     text = text.lower()
-    text = "".join([char for char in text if char not in string.punctuation])
+
+    # remove punctuation
+    text = "".join(ch for ch in text if ch not in string.punctuation)
+
+    # tokenize on spaces
     words = text.split()
-    words = [w for w in words if w not in stopwords.words("english")]
-    return " ".join(words)
 
-def load_and_preprocess():
+    # remove stopwords + lemmatize
+    cleaned_words = []
+    for w in words:
+        if w in STOPWORDS:
+            continue
+        lemma = LEMMATIZER.lemmatize(w)
+        cleaned_words.append(lemma)
+
+    return " ".join(cleaned_words)
+
+
+def build_clean_dataset(
+    true_path: str = "data/True.csv",
+    fake_path: str = "data/Fake.csv",
+    out_path: str = "data/combined_clean.csv",
+) -> None:
+    """
+    Load True/Fake CSV files, clean text, and save a combined dataset
+    with columns: ['original_text', 'clean_text', 'label'].
+    label: 1 = real (True.csv), 0 = fake (Fake.csv)
+    """
     print("Loading datasets...")
+    true_df = pd.read_csv(true_path)
+    fake_df = pd.read_csv(fake_path)
 
-    true_df = pd.read_csv("data/True.csv")
-    fake_df = pd.read_csv("data/Fake.csv")
+    # We expect at least a 'text' column, and often a 'title' column.
+    # If there is a title, concatenate it to the text to give more context.
+    def build_text_column(df: pd.DataFrame) -> pd.Series:
+        # Prefer 'text' if it exists
+        if "text" in df.columns:
+            base = df["text"].astype(str)
+        else:
+            # Try a few common alternatives
+            for col in ["content", "article", "body"]:
+                if col in df.columns:
+                    base = df[col].astype(str)
+                    break
+            else:
+                raise ValueError(
+                    "No text-like column found. Expected one of: 'text', 'content', 'article', 'body'."
+                )
 
-    true_df["label"] = 1
-    fake_df["label"] = 0
+        # If title exists, prepend it
+        if "title" in df.columns:
+            title = df["title"].fillna("").astype(str)
+            return title + " " + base
+        else:
+            return base
 
-    # Rename text column if needed
-    if "text" not in true_df.columns and "title" in true_df.columns:
-        true_df["text"] = true_df["title"] + " " + true_df["text"]
-    if "text" not in fake_df.columns and "title" in fake_df.columns:
-        fake_df["text"] = fake_df["title"] + " " + fake_df["text"]
+    print("Building unified text column...")
+    true_text = build_text_column(true_df)
+    fake_text = build_text_column(fake_df)
 
-    print("Cleaning text...")
-    true_df["clean_text"] = true_df["text"].apply(clean_text)
-    fake_df["clean_text"] = fake_df["text"].apply(clean_text)
+    # Build unified dataframes with just what we need
+    true_clean = pd.DataFrame(
+        {
+            "original_text": true_text,
+            "label": 1,  # real
+        }
+    )
+    fake_clean = pd.DataFrame(
+        {
+            "original_text": fake_text,
+            "label": 0,  # fake
+        }
+    )
 
-    print("Combining datasets...")
-    df = pd.concat([true_df, fake_df]).sample(frac=1).reset_index(drop=True)
+    combined = pd.concat([true_clean, fake_clean], ignore_index=True)
 
-    print("Applying TF-IDF...")
-    vectorizer = TfidfVectorizer(max_features=5000)
-    X = vectorizer.fit_transform(df["clean_text"])
-    y = df["label"]
+    print("Cleaning text (this may take a bit)...")
+    combined["clean_text"] = combined["original_text"].apply(clean_text)
 
-    return X, y, vectorizer, df
+    # Drop any rows where clean_text ended up empty
+    before = len(combined)
+    combined = combined[combined["clean_text"].str.strip() != ""]
+    combined = combined.dropna(subset=["clean_text"])
+    after = len(combined)
+    print(f"Dropped {before - after} empty/invalid rows after cleaning.")
+
+    # Shuffle so train/test later is well-mixed
+    combined = combined.sample(frac=1, random_state=42).reset_index(drop=True)
+
+    print(f"Saving cleaned combined dataset to {out_path} ...")
+    combined.to_csv(out_path, index=False)
+    print("DONE: combined_clean.csv written.")
+
 
 if __name__ == "__main__":
-    # paths to your datasets
-    true_path = "data/True.csv"
-    fake_path = "data/Fake.csv"
-
-    print("Loading datasets...")
-    import pandas as pd
-
-    df_true = pd.read_csv(true_path)
-    df_fake = pd.read_csv(fake_path)
-
-    print("Cleaning text...")
-
-    df_true["clean_text"] = df_true["text"].apply(clean_text)
-    df_fake["clean_text"] = df_fake["text"].apply(clean_text)
-
-    print("Saving cleaned data...")
-
-    df_true.to_csv("data/True_clean.csv", index=False)
-    df_fake.to_csv("data/Fake_clean.csv", index=False)
-
-    print("DONE! Cleaned files saved as True_clean.csv and Fake_clean.csv")
+    build_clean_dataset()
